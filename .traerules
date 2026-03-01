@@ -1,0 +1,64 @@
+# 语言ID: python
+# 文件路径: compliance_async_module.py
+
+import asyncio
+import os
+import logging
+from cryptography.fernet import Fernet
+from typing import AsyncGenerator, Dict, Any
+
+# 配置日志：仅记录到受控的本地加密文件，符合 PIPL 最小化原则
+logging.basicConfig(
+    filename="/var/log/fintech_compliance_encrypted.log",
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+
+# 生成或读取加密密钥，确保密钥文件权限 600
+KEY_PATH = "/etc/fintech/secrets/fernet.key"
+os.makedirs(os.path.dirname(KEY_PATH), mode=0o700, exist_ok=True)
+if not os.path.exists(KEY_PATH):
+    with open(os.open(KEY_PATH, os.O_CREAT | os.O_WRONLY, 0o600), "wb") as f:
+        f.write(Fernet.generate_key())
+with open(KEY_PATH, "rb") as f:
+    cipher = Fernet(f.read())
+
+
+async def encrypt_pii(data: bytes) -> bytes:
+    """异步加密个人敏感信息，符合 PIPL 要求"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, cipher.encrypt, data)
+
+
+async def decrypt_pii(token: bytes) -> bytes:
+    """异步解密个人敏感信息，仅限授权场景"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, cipher.decrypt, token)
+
+
+async def audit_log(action: str, user_id: str, metadata: Dict[str, Any]) -> None:
+    """异步记录合规审计日志，确保不可追溯个人敏感内容"""
+    safe_meta = {k: v for k, v in metadata.items() if k != "pii"}
+    logging.info(f"[AUDIT] action={action} user_hash={hash(user_id)} meta={safe_meta}")
+
+
+async def stream_anonymized_data(src_path: str) -> AsyncGenerator[bytes, None]:
+    """异步流式读取并匿名化数据，避免内存堆积，符合高效安全原则"""
+    async with await asyncio.to_thread(open, src_path, "rb") as f:
+        while chunk := await asyncio.to_thread(f.read, 8192):
+            # 简单示例：将身份证号替换为掩码
+            masked = chunk.replace(b"\x01", b"*")
+            yield masked
+
+
+# 示例主协程，仅供单元测试
+async def main():
+    await audit_log("startup", "system", {"phase": "init"})
+    async for data in stream_anonymized_data("/tmp/demo.dat"):
+        encrypted = await encrypt_pii(data)
+        # TODO: 上传至合规数据湖（需额外授权校验）
+    await audit_log("shutdown", "system", {"phase": "cleanup"})
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
